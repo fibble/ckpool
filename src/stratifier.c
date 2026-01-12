@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <string.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #ifdef HAVE_ZMQ_H
@@ -473,6 +474,10 @@ struct stratifier_data {
 	proxy_t *subproxy; /* Which subproxy this sdata belongs to in proxy mode */
 };
 
+/* Share notification socket for external pool engine */
+static int share_notify_fd = -1;
+static char *share_notify_path = NULL;
+
 typedef struct json_entry json_entry_t;
 
 struct json_entry {
@@ -485,6 +490,71 @@ struct json_entry {
 #define GEN_LAX 0
 #define GEN_NORMAL 1
 #define GEN_PRIORITY 2
+
+/* ========== Share Notification for External Pool Engine ========== */
+
+static void setup_share_notify(void)
+{
+	const char *path = getenv("SHARE_SOCKET_PATH");
+	if (!path || !*path) {
+		path = "/var/run/pool/shares.sock";
+	}
+	share_notify_path = strdup(path);
+	share_notify_fd = -1;
+	LOGNOTICE("Share notifications will be sent to %s", share_notify_path);
+}
+
+static int connect_share_notify(void)
+{
+	struct sockaddr_un addr;
+	int fd;
+
+	if (!share_notify_path)
+		return -1;
+
+	if (share_notify_fd >= 0)
+		return share_notify_fd;
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, share_notify_path, sizeof(addr.sun_path) - 1);
+
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	share_notify_fd = fd;
+	LOGNOTICE("Connected to share notification socket");
+	return fd;
+}
+
+static void notify_share(const char *worker, double sdiff, int32_t height, bool is_block)
+{
+	char buf[512];
+	int len, fd;
+
+	fd = connect_share_notify();
+	if (fd < 0)
+		return;
+
+	len = snprintf(buf, sizeof(buf),
+		"{\"worker\":\"%s\",\"diff\":%.0f,\"height\":%d,\"is_block\":%s}\n",
+		worker, sdiff, height, is_block ? "true" : "false");
+
+	if (write(fd, buf, len) < 0) {
+		close(fd);
+		share_notify_fd = -1;
+	}
+}
+
+/* ========== End Share Notification ========== */
 
 /* For storing a set of messages within another lock, allowing us to dump them
  * to the log outside of lock */
@@ -6336,6 +6406,10 @@ out_nowb:
 						client->identity, sdiff, diff, wdiffsuffix, ckp->mindiff, hexhash);
 				}
 				result = true;
+
+				/* Notify external pool engine */
+				notify_share(user->username, sdiff, sdata->current_workbase->height,
+					     sdiff >= sdata->current_workbase->network_diff);
 			} else {
 				err = SE_DUPE;
 				json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
@@ -8813,6 +8887,9 @@ void *stratifier(void *arg)
 	mutex_init(&sdata->share_lock);
 	if (!ckp->proxy)
 		create_pthread(&pth_zmqnotify, zmqnotify, ckp);
+
+	/* Initialize share notification for external pool engine */
+	setup_share_notify();
 
 	ckp->stratifier_ready = true;
 	LOGWARNING("%s stratifier ready", ckp->name);
