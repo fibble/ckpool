@@ -535,9 +535,10 @@ static int connect_share_notify(void)
 	return fd;
 }
 
-static void notify_share(const char *worker, double sdiff, int32_t height, bool is_block)
+static void notify_share(const char *worker, double sdiff, int32_t height, bool is_block,
+			 const char *hash, double network_diff, const char *nonce)
 {
-	char buf[512];
+	char buf[1024];
 	int len, fd;
 
 	fd = connect_share_notify();
@@ -545,8 +546,10 @@ static void notify_share(const char *worker, double sdiff, int32_t height, bool 
 		return;
 
 	len = snprintf(buf, sizeof(buf),
-		"{\"worker\":\"%s\",\"diff\":%.0f,\"height\":%d,\"is_block\":%s}\n",
-		worker, sdiff, height, is_block ? "true" : "false");
+		"{\"worker\":\"%s\",\"diff\":%.0f,\"height\":%d,\"is_block\":%s,"
+		"\"hash\":\"%s\",\"network_diff\":%.0f,\"nonce\":\"%s\"}\n",
+		worker, sdiff, height, is_block ? "true" : "false",
+		hash ? hash : "", network_diff, nonce ? nonce : "");
 
 	if (write(fd, buf, len) < 0) {
 		close(fd);
@@ -6409,7 +6412,8 @@ out_nowb:
 
 				/* Notify external pool engine */
 				notify_share(user->username, sdiff, sdata->current_workbase->height,
-					     sdiff >= sdata->current_workbase->network_diff);
+					     sdiff >= sdata->current_workbase->network_diff,
+					     hexhash, sdata->current_workbase->network_diff, nonce);
 			} else {
 				err = SE_DUPE;
 				json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
